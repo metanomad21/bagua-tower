@@ -49,6 +49,28 @@ interface PendingHit {
   left: number;
 }
 
+/** 追命飞剑（天雷无妄阵）：自动追踪敌人的飞行实体 */
+interface Homer {
+  pos: Vec2;
+  targetId: number;
+  speed: number;
+  damage: number;
+  tower: GuaInstance;
+  life: number;
+  angle: number;
+}
+
+/** 石甲土偶（地山谦阵）：驻留怪道、光环反伤减速的召唤单位 */
+interface Summon {
+  pos: Vec2;
+  hp: number;
+  maxHp: number;
+  dmg: number;
+  radius: number;
+  life: number;
+  tower: GuaInstance;
+}
+
 export class CombatSystem {
   enemies: Enemy[] = [];
   zones: Zone[] = [];
@@ -60,6 +82,8 @@ export class CombatSystem {
   private nextId = 1;
   private cooldowns = new Map<number, number>();
   private pending: PendingHit[] = [];
+  homers: Homer[] = [];
+  summons: Summon[] = [];
 
   constructor(
     private board: Board,
@@ -86,7 +110,9 @@ export class CombatSystem {
     this.events = [];
     this.moveEnemies(dt);
     this.updateZones(dt);
+    this.updateSummons(dt);
     this.resolvePending(dt);
+    this.updateHomers(dt);
     this.towersFire(dt);
     this.enemies = this.enemies.filter((e) => e.hp > 0 && !e.reachedEnd);
   }
@@ -95,6 +121,8 @@ export class CombatSystem {
   clearTransients(): void {
     this.zones = [];
     this.pending = [];
+    this.homers = [];
+    this.summons = [];
     this.cooldowns.clear();
   }
 
@@ -104,6 +132,8 @@ export class CombatSystem {
     this.zones = [];
     this.events = [];
     this.pending = [];
+    this.homers = [];
+    this.summons = [];
     this.coins = 0;
     this.coreHp = CONFIG.core.hp;
     this.globalDamageMul = 1;
@@ -154,6 +184,54 @@ export class CombatSystem {
       }
       this.cooldowns.set(i, cd);
     }
+  }
+
+  /** 追命飞剑：追踪目标并命中（天雷无妄阵） */
+  private updateHomers(dt: number): void {
+    const live: Homer[] = [];
+    for (const h of this.homers) {
+      h.life -= dt;
+      if (h.life <= 0) continue;
+      let t = this.enemies.find((e) => e.id === h.targetId && e.hp > 0);
+      if (!t) {
+        const n = this.nearestEnemy(h.pos, 12);
+        if (!n) continue;
+        h.targetId = n.id;
+        t = n;
+      }
+      const tp = this.enemyPos(t);
+      const dx = tp.x - h.pos.x;
+      const dy = tp.y - h.pos.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      h.angle = Math.atan2(dy, dx);
+      if (d < 0.45) {
+        this.damage(t, h.damage, h.tower);
+        this.events.push({ t: 'rider', effect: 'swordHit', to: tp });
+        continue;
+      }
+      const inv = d > 0.0001 ? (h.speed * dt) / d : 0;
+      h.pos.x += dx * inv;
+      h.pos.y += dy * inv;
+      live.push(h);
+    }
+    this.homers = live;
+  }
+
+  /** 石甲土偶：光环范围内持续反伤 + 减速（地山谦阵） */
+  private updateSummons(dt: number): void {
+    const live: Summon[] = [];
+    for (const s of this.summons) {
+      s.life -= dt;
+      if (s.life <= 0) continue;
+      for (const e of this.enemies) {
+        if (dist(this.enemyPos(e), s.pos) <= s.radius) {
+          this.damage(e, s.dmg * dt, s.tower);
+          if (!e.statuses.some((x) => x.kind === 'slow')) e.statuses.push({ kind: 'slow', amount: 0.4, until: 0.3 });
+        }
+      }
+      live.push(s);
+    }
+    this.summons = live;
   }
 
   private nearestEnemy(from: Vec2, range: number, exclude?: Enemy): Enemy | null {
@@ -256,6 +334,57 @@ export class CombatSystem {
             if (target.statuses.some((s) => s.kind === 'wet')) {
               this.damage(target, Number(p.dmg) * scale, tower);
               this.events.push({ t: 'rider', effect: 'steamBurst', to: tp });
+            }
+            break;
+          case 'flameSword': {
+            // 火天大有：飞剑裹火，命中追加火伤并沿命中点留火轨
+            this.damage(target, Number(p.dmg) * scale, tower);
+            this.zones.push({ pos: tp, radius: 1.2, kind: 'firePatch', dmg: 3 * scale, until: Number(p.dur ?? 1.5) });
+            this.events.push({ t: 'rider', effect: 'flameSword', from: this.topo.cellCenter(tower.cellIndex), to: tp });
+            break;
+          }
+          case 'detonateBurn': {
+            // 山火贲：砸中灼烧目标→引爆火山喷发（范围火爆）
+            if (target.statuses.some((s) => s.kind === 'burn')) {
+              target.statuses = target.statuses.filter((s) => s.kind !== 'burn');
+              const d = Number(p.dmg) * scale;
+              this.damage(target, d, tower);
+              for (const e of this.enemies) {
+                if (e !== target && dist(this.enemyPos(e), tp) <= 2) this.damage(e, d * 0.6, tower);
+              }
+              this.events.push({ t: 'rider', effect: 'volcano', to: tp });
+            }
+            break;
+          }
+          case 'vortex':
+            // 风水涣：水漩涡（VFX；聚怪由 statMod 范围 + 巽减速实现）
+            this.events.push({ t: 'rider', effect: 'vortex', to: tp });
+            break;
+          case 'conduct': {
+            // 水雷屯：对潮湿目标必连锁、伤害翻倍
+            if (target.statuses.some((s) => s.kind === 'wet')) {
+              const d = Number(p.dmg) * scale * 2;
+              this.damage(target, d, tower);
+              const near = this.nearestEnemy(tp, 3, target);
+              if (near) {
+                this.damage(near, d, tower);
+                this.events.push({ t: 'rider', effect: 'conduct', from: tp, to: this.enemyPos(near) });
+              } else {
+                this.events.push({ t: 'rider', effect: 'conduct', from: this.topo.cellCenter(tower.cellIndex), to: tp });
+              }
+            }
+            break;
+          }
+          case 'summonSword': {
+            // 天雷无妄：召唤追命飞剑
+            const swordTgt = this.nearestEnemy(tp, 8, target) ?? target;
+            this.homers.push({ pos: { x: tp.x, y: tp.y }, targetId: swordTgt.id, speed: 6, damage: Number(p.dmg) * scale, tower, life: 2, angle: 0 });
+            break;
+          }
+          case 'summonGolem':
+            // 地山谦：召石甲土偶（光环反伤减速）
+            if (this.summons.length < 8) {
+              this.summons.push({ pos: { x: tp.x, y: tp.y }, hp: Number(p.hp ?? 40), maxHp: Number(p.hp ?? 40), dmg: Number(p.dmg ?? 6) * scale, radius: 1.6, life: Number(p.dur ?? 6), tower });
             }
             break;
         }

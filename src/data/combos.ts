@@ -53,4 +53,49 @@ export const COMBO_TABLE: ComboDef[] = [
       { to: 'li', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'steamBurst', dmg: 7, condition: 'wet' } } },
     ],
   },
+
+  // ── 扩展组合（第二批，GDD §10）──
+  {
+    pair: ['li', 'qian'], name: '火天大有阵', desc: '飞剑裹火穿透留火轨、火球射程拉满',
+    riders: [
+      { to: 'qian', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'flameSword', dmg: 6, dur: 1.5 }, scalesWithLevel: true } },
+      { to: 'li', rider: { verb: 'statMod', target: 'self', params: { stat: 'range', add: 1.5 } } },
+    ],
+  },
+  {
+    pair: ['li', 'gen'], name: '山火贲阵', desc: '离挂灼烧，艮砸落引爆成火山喷发',
+    riders: [
+      { to: 'li', rider: { verb: 'applyStatus', target: 'enemy', params: { status: 'burn', amount: 4, dur: 3 } } },
+      { to: 'gen', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'detonateBurn', dmg: 14 }, scalesWithLevel: true } },
+    ],
+  },
+  {
+    pair: ['xun', 'kan'], name: '风水涣阵', desc: '水波扩大并漩涡牵引聚怪',
+    riders: [
+      { to: 'kan', rider: { verb: 'statMod', target: 'self', params: { stat: 'aoe', mul: 1.6 } } },
+      { to: 'kan', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'vortex' } } },
+      { to: 'xun', rider: { verb: 'applyStatus', target: 'enemy', params: { status: 'slow', amount: 0.4, dur: 2.5 } } },
+    ],
+  },
+  {
+    pair: ['kan', 'zhen'], name: '水雷屯阵', desc: '潮湿之敌雷击必连锁、伤害翻倍',
+    riders: [
+      { to: 'kan', rider: { verb: 'applyStatus', target: 'enemy', params: { status: 'wet', dur: 2.5 } } },
+      { to: 'zhen', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'conduct', dmg: 6 }, scalesWithLevel: true } },
+    ],
+  },
+  {
+    pair: ['qian', 'zhen'], name: '天雷无妄阵', desc: '雷击召唤追命飞剑、金气增伤',
+    riders: [
+      { to: 'zhen', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'summonSword', dmg: 8 }, scalesWithLevel: true } },
+      { to: 'qian', rider: { verb: 'statMod', target: 'self', params: { stat: 'damage', mul: 1.2 } } },
+    ],
+  },
+  {
+    pair: ['kun', 'gen'], name: '地山谦阵', desc: '召石甲土偶，光环反伤减速',
+    riders: [
+      { to: 'kun', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'summonGolem', hp: 40, dmg: 6, dur: 6 }, scalesWithLevel: true } },
+      { to: 'gen', rider: { verb: 'statMod', target: 'self', params: { stat: 'damage', mul: 1.2 } } },
+    ],
+  },
 ];

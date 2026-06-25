@@ -104,20 +104,20 @@ export class BoardView {
   }
 
   private buildPanel(): void {
-    this.panel.position.set(this.boardW + 0.6 * SCALE + 28, -0.4 * SCALE);
-    let y = 0;
-    this.panel.addChild(this.text('组合阵法', 0, y, 16, 0xffd166, false));
-    y += 26;
-    for (const c of COMBO_TABLE) {
-      const head = `${NAME[c.pair[0]]}+${NAME[c.pair[1]]}  ${c.name}`;
-      this.panel.addChild(this.text(head, 0, y, 13, 0xe8e3ff, false));
-      this.panel.addChild(this.text(c.desc, 12, y + 16, 11, 0x9d8cff, false));
-      y += 38;
-    }
-    y += 6;
-    this.panel.addChild(this.text('合成升级', 0, y, 16, 0xffd166, false));
-    this.panel.addChild(this.text('两个同卦同级 → 高一级', 0, y + 24, 12, 0xe8e3ff, false));
-    this.panel.addChild(this.text('Lv1 · Lv2 · Lv3 · Lv4（封顶）', 0, y + 42, 12, 0x9d8cff, false));
+    this.panel.position.set(this.boardW + 0.6 * SCALE + 24, -0.5 * SCALE);
+    this.panel.addChild(this.text('组合阵法', 0, 0, 16, 0xffd166, false));
+    const colW = 162;
+    const half = Math.ceil(COMBO_TABLE.length / 2);
+    COMBO_TABLE.forEach((c, idx) => {
+      const x = Math.floor(idx / half) * colW;
+      const y = 24 + (idx % half) * 36;
+      this.panel.addChild(this.text(`${NAME[c.pair[0]]}+${NAME[c.pair[1]]} ${c.name}`, x, y, 12, 0xe8e3ff, false));
+      this.panel.addChild(this.text(c.desc, x + 6, y + 15, 10, 0x9d8cff, false));
+    });
+    const by = 24 + half * 36 + 6;
+    this.panel.addChild(this.text('合成升级', 0, by, 16, 0xffd166, false));
+    this.panel.addChild(this.text('两个同卦同级 → 高一级', 0, by + 22, 12, 0xe8e3ff, false));
+    this.panel.addChild(this.text('Lv1 · Lv2 · Lv3 · Lv4（封顶）', 0, by + 40, 12, 0x9d8cff, false));
   }
 
   /** 怪物起点（绿）/ 终点（红）标识，落在外圈怪道上（GDD §14②） */
@@ -159,6 +159,33 @@ export class BoardView {
       this.dynLayer.addChild(new Graphics().rect(p.x * SCALE - 10, p.y * SCALE - 15, 20 * frac, 3).fill({ color: 0x7cfc8a }));
     }
 
+    // 石甲土偶（召唤单位）+ 反伤光环（地山谦阵）
+    for (const s of cb.summons) {
+      const x = s.pos.x * SCALE;
+      const y = s.pos.y * SCALE;
+      this.dynLayer.addChild(new Graphics().circle(x, y, s.radius * SCALE).fill({ color: 0xb08968, alpha: 0.1 }).stroke({ width: 1, color: 0xb08968, alpha: 0.3 }));
+      const g = new Graphics();
+      g.roundRect(x - 9, y - 12, 18, 22, 3).fill({ color: 0xb08968 }).stroke({ width: 2, color: 0x6b5640 });
+      g.rect(x - 6, y - 6, 4, 4).fill({ color: 0x4a3b2a });
+      g.rect(x + 2, y - 6, 4, 4).fill({ color: 0x4a3b2a });
+      this.dynLayer.addChild(g);
+      const lf = Math.max(0.1, s.hp / s.maxHp);
+      this.dynLayer.addChild(new Graphics().rect(x - 9, y - 17, 18 * lf, 2.5).fill({ color: 0xd0a060 }));
+    }
+
+    // 追命飞剑（天雷无妄阵）
+    for (const h of cb.homers) {
+      const x = h.pos.x * SCALE;
+      const y = h.pos.y * SCALE;
+      const a = h.angle;
+      const nx = Math.cos(a + Math.PI / 2);
+      const ny = Math.sin(a + Math.PI / 2);
+      const g = new Graphics();
+      g.poly([x + Math.cos(a) * 11, y + Math.sin(a) * 11, x + nx * 3.5, y + ny * 3.5, x - Math.cos(a) * 7, y - Math.sin(a) * 7, x - nx * 3.5, y - ny * 3.5]).fill({ color: 0xf4d35e }).stroke({ width: 1, color: 0xfff3b0 });
+      g.circle(x - Math.cos(a) * 9, y - Math.sin(a) * 9, 3).fill({ color: 0xfff3b0, alpha: 0.5 });
+      this.dynLayer.addChild(g);
+    }
+
     if (this.drag) this.drawDragHints();
   }
 
@@ -191,19 +218,24 @@ export class BoardView {
       const pts: number[] = [];
       const n = 8;
       for (let i = 0; i < n; i++) {
-        const a = (i / n) * Math.PI * 2;
-        const rad = r * (i % 2 ? 1 : 0.62);
+        const a = (i / n) * Math.PI * 2 + this.clock * 0.4;
+        const rad = r * (i % 2 ? 1 : 0.6);
         pts.push(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad);
       }
-      g.poly(pts).fill({ color: 0x9fd8f0, alpha: 0.3 }).stroke({ width: 2, color: 0xd8f4ff, alpha: 0.65 });
+      g.circle(cx, cy, r * 1.05).fill({ color: 0x9fd8f0, alpha: 0.08 }); // 寒气辉
+      g.poly(pts).fill({ color: 0x9fd8f0, alpha: 0.3 }).stroke({ width: 2, color: 0xd8f4ff, alpha: 0.7 });
+      for (let i = 0; i < n; i += 2) g.moveTo(cx, cy).lineTo(pts[i * 2], pts[i * 2 + 1]).stroke({ width: 1, color: 0xeaffff, alpha: 0.4 }); // 棱面
+      g.circle(cx - r * 0.2, cy - r * 0.2, r * 0.18).fill({ color: 0xffffff, alpha: 0.4 }); // 高光
     } else {
-      g.circle(cx, cy, r).fill({ color: 0xff8c42, alpha: 0.12 });
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2;
-        const fl = 0.6 + 0.4 * Math.sin(this.clock * 9 + i * 1.7);
-        const bx = cx + Math.cos(a) * r * 0.5;
-        const by = cy + Math.sin(a) * r * 0.5;
-        g.poly([bx - 4, by, bx, by - 15 * fl, bx + 4, by]).fill({ color: i % 2 ? 0xffe066 : 0xef476f, alpha: 0.7 });
+      g.circle(cx, cy, r * 1.05).fill({ color: 0xef476f, alpha: 0.08 });
+      g.circle(cx, cy, r * 0.7).fill({ color: 0xff8c42, alpha: 0.14 });
+      for (let i = 0; i < 8; i++) {
+        const ang = (i / 8) * Math.PI * 2;
+        const fl = 0.55 + 0.45 * Math.sin(this.clock * 10 + i * 1.5);
+        const bx = cx + Math.cos(ang) * r * 0.5;
+        const by = cy + Math.sin(ang) * r * 0.5;
+        g.poly([bx - 4, by + 2, bx, by - 16 * fl, bx + 4, by + 2]).fill({ color: i % 2 ? 0xffe066 : 0xef476f, alpha: 0.7 });
+        g.poly([bx - 2, by + 1, bx, by - 9 * fl, bx + 2, by + 1]).fill({ color: 0xfff3b0, alpha: 0.6 });
       }
     }
     this.dynLayer.addChild(g);
