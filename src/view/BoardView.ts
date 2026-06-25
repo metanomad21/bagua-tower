@@ -137,6 +137,7 @@ export class BoardView {
     const cb = this.state.combat;
 
     for (const z of cb.zones) this.drawZone(z);
+    for (const v of cb.volcanoes) this.drawVolcano(v);
 
     // 组合塔边框脉冲（仅 Graphics，每帧重画并销毁）
     for (const i of this.state.board.occupiedIndices()) {
@@ -236,6 +237,38 @@ export class BoardView {
         const by = cy + Math.sin(ang) * r * 0.5;
         g.poly([bx - 4, by + 2, bx, by - 16 * fl, bx + 4, by + 2]).fill({ color: i % 2 ? 0xffe066 : 0xef476f, alpha: 0.7 });
         g.poly([bx - 2, by + 1, bx, by - 9 * fl, bx + 2, by + 1]).fill({ color: 0xfff3b0, alpha: 0.6 });
+      }
+    }
+    this.dynLayer.addChild(g);
+  }
+
+  /** 火山实体（山火贲阵）：隆起 → 喷发吐岩浆 → 持续岩浆池，末尾淡出 */
+  private drawVolcano(v: { pos: Vec2; radius: number; life: number; maxLife: number }): void {
+    const cx = v.pos.x * SCALE;
+    const cy = v.pos.y * SCALE;
+    const R = v.radius * SCALE;
+    const age = v.maxLife - v.life;
+    const fade = v.life < 0.5 ? v.life / 0.5 : 1;
+    const rise = Math.min(1, age / 0.4);
+    const g = new Graphics();
+    // 熔岩池（碰到的怪受伤区域）
+    g.ellipse(cx, cy + 6, R * rise, R * 0.45 * rise).fill({ color: 0xef476f, alpha: 0.22 * fade });
+    g.ellipse(cx, cy + 6, R * 0.6 * rise, R * 0.28 * rise).fill({ color: 0xff8c42, alpha: 0.38 * fade });
+    // 火山锥（隆起山体）
+    const h = 26 * rise;
+    const w = 16 * rise;
+    g.poly([cx - w, cy + 8, cx - 5, cy + 8 - h, cx + 5, cy + 8 - h, cx + w, cy + 8]).fill({ color: 0x6b5640, alpha: fade }).stroke({ width: 1.5, color: 0x4a3b2a, alpha: fade });
+    g.ellipse(cx, cy + 8 - h, 6, 3).fill({ color: 0xffe066, alpha: fade }); // 火山口熔岩
+    // 喷发：火柱 + 抛物吐岩浆
+    if (age > 0.35) {
+      const cl = 0.5 + 0.5 * Math.sin(this.clock * 12);
+      g.ellipse(cx, cy + 8 - h - 7, 5, 9 * cl).fill({ color: 0xffe066, alpha: 0.7 * fade });
+      for (let i = 0; i < 6; i++) {
+        const t = (this.clock * 1.6 + i * 0.5) % 1;
+        const dirx = (i % 2 ? 1 : -1) * (0.4 + (i % 3) * 0.25);
+        const px = cx + dirx * 30 * t;
+        const py = cy + 8 - h - (40 * t - 46 * t * t);
+        g.circle(px, py, 3.2 - t * 1.6).fill({ color: i % 2 ? 0xffe066 : 0xef476f, alpha: fade });
       }
     }
     this.dynLayer.addChild(g);

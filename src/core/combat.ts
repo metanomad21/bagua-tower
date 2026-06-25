@@ -71,6 +71,16 @@ interface Summon {
   tower: GuaInstance;
 }
 
+/** 火山（山火贲阵）：地面隆起喷发、持续灼烧范围内敌人的实体 */
+interface Volcano {
+  pos: Vec2;
+  radius: number;
+  dmg: number;
+  life: number;
+  maxLife: number;
+  tower: GuaInstance;
+}
+
 export class CombatSystem {
   enemies: Enemy[] = [];
   zones: Zone[] = [];
@@ -84,6 +94,7 @@ export class CombatSystem {
   private pending: PendingHit[] = [];
   homers: Homer[] = [];
   summons: Summon[] = [];
+  volcanoes: Volcano[] = [];
 
   constructor(
     private board: Board,
@@ -111,6 +122,7 @@ export class CombatSystem {
     this.moveEnemies(dt);
     this.updateZones(dt);
     this.updateSummons(dt);
+    this.updateVolcanoes(dt);
     this.resolvePending(dt);
     this.updateHomers(dt);
     this.towersFire(dt);
@@ -123,6 +135,7 @@ export class CombatSystem {
     this.pending = [];
     this.homers = [];
     this.summons = [];
+    this.volcanoes = [];
     this.cooldowns.clear();
   }
 
@@ -134,6 +147,7 @@ export class CombatSystem {
     this.pending = [];
     this.homers = [];
     this.summons = [];
+    this.volcanoes = [];
     this.coins = 0;
     this.coreHp = CONFIG.core.hp;
     this.globalDamageMul = 1;
@@ -232,6 +246,20 @@ export class CombatSystem {
       live.push(s);
     }
     this.summons = live;
+  }
+
+  /** 火山：持续灼烧范围内敌人（山火贲阵） */
+  private updateVolcanoes(dt: number): void {
+    const live: Volcano[] = [];
+    for (const v of this.volcanoes) {
+      v.life -= dt;
+      if (v.life <= 0) continue;
+      for (const e of this.enemies) {
+        if (dist(this.enemyPos(e), v.pos) <= v.radius) this.damage(e, v.dmg * dt, v.tower);
+      }
+      live.push(v);
+    }
+    this.volcanoes = live;
   }
 
   private nearestEnemy(from: Vec2, range: number, exclude?: Enemy): Enemy | null {
@@ -344,14 +372,15 @@ export class CombatSystem {
             break;
           }
           case 'detonateBurn': {
-            // 山火贲：砸中灼烧目标→引爆火山喷发（范围火爆）
-            if (target.statuses.some((s) => s.kind === 'burn')) {
+            // 山火贲：砸中灼烧目标→引爆并生成持续火山。同一艮实例同时只允许一座火山
+            if (target.statuses.some((s) => s.kind === 'burn') && !this.volcanoes.some((v) => v.tower === tower)) {
               target.statuses = target.statuses.filter((s) => s.kind !== 'burn');
               const d = Number(p.dmg) * scale;
               this.damage(target, d, tower);
               for (const e of this.enemies) {
                 if (e !== target && dist(this.enemyPos(e), tp) <= 2) this.damage(e, d * 0.6, tower);
               }
+              this.volcanoes.push({ pos: { x: tp.x, y: tp.y }, radius: 1.8, dmg: d * 0.5, life: 3, maxLife: 3, tower });
               this.events.push({ t: 'rider', effect: 'volcano', to: tp });
             }
             break;
