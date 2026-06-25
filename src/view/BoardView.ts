@@ -464,10 +464,21 @@ export class BoardView {
     this.lastPhase = this.state.phase;
     this.clearContainer(this.overlay);
     if (this.state.phase === 'won' || this.state.phase === 'lost') {
-      const txt = this.state.phase === 'won' ? '通关！守住了中宫' : '败北 · 中宫被破';
-      this.overlay.addChild(this.text(txt, this.boardW / 2, this.boardH / 2 - 20, 26, 0xffd166));
-      const btn = this.makeButton('重新开始', 120, 40, () => this.restart());
-      btn.position.set(this.boardW / 2 - 60, this.boardH / 2 + 16);
+      const win = this.state.phase === 'won';
+      const accent = win ? 0xffd166 : 0xef476f;
+      // 暗化背景，聚焦弹窗
+      this.overlay.addChild(
+        new Graphics().rect(-0.6 * SCALE, -0.6 * SCALE, this.boardW + 1.2 * SCALE, this.boardH + 1.2 * SCALE).fill({ color: 0x0d0b14, alpha: 0.62 }),
+      );
+      // 居中弹窗面板（胜负通用）
+      const pw = 300;
+      const ph = 150;
+      const px = this.boardW / 2 - pw / 2;
+      const py = this.boardH / 2 - ph / 2;
+      this.overlay.addChild(new Graphics().roundRect(px, py, pw, ph, 14).fill({ color: 0x1b1730 }).stroke({ width: 2, color: accent }));
+      this.overlay.addChild(this.text(win ? '通关！守住了中宫' : '败北 · 中宫被破', this.boardW / 2, py + 50, 24, accent));
+      const btn = this.makeButton('重新开始', 130, 42, () => this.restart());
+      btn.position.set(this.boardW / 2 - 65, py + ph - 62);
       this.overlay.addChild(btn);
     }
   }
