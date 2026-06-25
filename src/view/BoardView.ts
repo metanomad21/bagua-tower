@@ -6,6 +6,7 @@ import { COMBO_TABLE } from '../data/combos.ts';
 import { GUA_TABLE } from '../data/gua.ts';
 import { CONFIG } from '../data/config.ts';
 import { EffectsLayer, damageNumber, qiPickup, coinBurst } from './effects.ts';
+import { DIFFICULTIES, type Difficulty } from '../data/difficulty.ts';
 
 // ─────────────────────────────────────────────────────────────
 // 表现层（GDD §11 View）。只订阅 core 状态来画，不持有游戏逻辑。
@@ -337,6 +338,7 @@ export class BoardView {
 
   private phaseLabel(): string {
     switch (this.state.phase) {
+      case 'select': return '选择难度';
       case 'building': return '布阵中';
       case 'wave': return '回合中';
       case 'won': return '通关';
@@ -463,28 +465,55 @@ export class BoardView {
     if (this.state.phase === this.lastPhase) return;
     this.lastPhase = this.state.phase;
     this.clearContainer(this.overlay);
-    if (this.state.phase === 'won' || this.state.phase === 'lost') {
-      const win = this.state.phase === 'won';
-      const accent = win ? 0xffd166 : 0xef476f;
-      // 暗化背景，聚焦弹窗
-      this.overlay.addChild(
-        new Graphics().rect(-0.6 * SCALE, -0.6 * SCALE, this.boardW + 1.2 * SCALE, this.boardH + 1.2 * SCALE).fill({ color: 0x0d0b14, alpha: 0.62 }),
-      );
-      // 居中弹窗面板（胜负通用）
-      const pw = 300;
-      const ph = 150;
-      const px = this.boardW / 2 - pw / 2;
-      const py = this.boardH / 2 - ph / 2;
-      this.overlay.addChild(new Graphics().roundRect(px, py, pw, ph, 14).fill({ color: 0x1b1730 }).stroke({ width: 2, color: accent }));
-      this.overlay.addChild(this.text(win ? '通关！守住了中宫' : '败北 · 中宫被破', this.boardW / 2, py + 50, 24, accent));
-      const btn = this.makeButton('重新开始', 130, 42, () => this.restart());
-      btn.position.set(this.boardW / 2 - 65, py + ph - 62);
-      this.overlay.addChild(btn);
-    }
+    if (this.state.phase === 'select') this.showSelectPanel();
+    else if (this.state.phase === 'won' || this.state.phase === 'lost') this.showResultPanel();
+  }
+
+  private dimRect(): Graphics {
+    return new Graphics().rect(-0.6 * SCALE, -0.6 * SCALE, this.boardW + 1.2 * SCALE, this.boardH + 1.2 * SCALE).fill({ color: 0x0d0b14, alpha: 0.62 });
+  }
+
+  private showSelectPanel(): void {
+    this.overlay.addChild(this.dimRect());
+    const pw = 340;
+    const ph = 180;
+    const px = this.boardW / 2 - pw / 2;
+    const py = this.boardH / 2 - ph / 2;
+    this.overlay.addChild(new Graphics().roundRect(px, py, pw, ph, 14).fill({ color: 0x1b1730 }).stroke({ width: 2, color: 0x9d8cff }));
+    this.overlay.addChild(this.text('选择难度', this.boardW / 2, py + 40, 24, 0xe8e3ff));
+    const b1 = this.makeButton('正常', 130, 44, () => this.startGame(DIFFICULTIES[0]));
+    b1.position.set(this.boardW / 2 - 140, py + 78);
+    const b2 = this.makeButton('困难', 130, 44, () => this.startGame(DIFFICULTIES[1]));
+    b2.position.set(this.boardW / 2 + 10, py + 78);
+    this.overlay.addChild(b1, b2);
+    this.overlay.addChild(this.text('困难：数量×3，HP×5 每回合 +10%', this.boardW / 2, py + ph - 38, 12, 0x9d8cff));
+    this.overlay.addChild(this.text('移速 +30% 每回合 +5%，起卦消耗 ×2', this.boardW / 2, py + ph - 20, 12, 0x9d8cff));
+  }
+
+  private showResultPanel(): void {
+    const win = this.state.phase === 'won';
+    const accent = win ? 0xffd166 : 0xef476f;
+    this.overlay.addChild(this.dimRect());
+    const pw = 300;
+    const ph = 150;
+    const px = this.boardW / 2 - pw / 2;
+    const py = this.boardH / 2 - ph / 2;
+    this.overlay.addChild(new Graphics().roundRect(px, py, pw, ph, 14).fill({ color: 0x1b1730 }).stroke({ width: 2, color: accent }));
+    this.overlay.addChild(this.text(win ? '通关！守住了中宫' : '败北 · 中宫被破', this.boardW / 2, py + 50, 24, accent));
+    const btn = this.makeButton('重新开始', 130, 42, () => this.restart());
+    btn.position.set(this.boardW / 2 - 65, py + ph - 62);
+    this.overlay.addChild(btn);
+  }
+
+  private startGame(diff: Difficulty): void {
+    this.state.start(diff);
+    this.effects.clear();
+    this.attackFlash.clear();
+    this.dirty = true;
   }
 
   private restart(): void {
-    this.state.reset();
+    this.state.toMenu();
     this.effects.clear();
     this.attackFlash.clear();
     this.dirty = true;

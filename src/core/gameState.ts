@@ -7,7 +7,8 @@ import type { GuaDef, StashItem } from './types.ts';
 import { GUA_TABLE } from '../data/gua.ts';
 import { COMBO_TABLE } from '../data/combos.ts';
 import { CONFIG } from '../data/config.ts';
-import { WAVES } from '../data/waves.ts';
+import { WAVES, WAVE_BASE_HP, WAVE_HP_GROWTH } from '../data/waves.ts';
+import { DIFFICULTIES, type Difficulty } from '../data/difficulty.ts';
 
 // ─────────────────────────────────────────────────────────────
 // 顶层状态容器（GDD §11 Core 层）。纯逻辑，零渲染依赖。
@@ -20,7 +21,7 @@ export type MoveResult = 'moved' | 'merged' | 'swapped' | 'illegal';
 export type DrawResult = { ok: true } | { ok: false; reason: 'no-qi' };
 
 /** 局内阶段：布阵 / 回合 / 胜 / 负（无三选一） */
-export type RunPhase = 'building' | 'wave' | 'won' | 'lost';
+export type RunPhase = 'select' | 'building' | 'wave' | 'won' | 'lost';
 
 export class GameState {
   readonly board: Board;
@@ -34,7 +35,8 @@ export class GameState {
   /** 整局已起卦次数（驱动成本递增，整局累加、不重置） */
   drawCount = 0;
 
-  phase: RunPhase = 'building';
+  diff: Difficulty = DIFFICULTIES[0];
+  phase: RunPhase = 'select';
   waveIndex = -1;
 
   private spawnQueue = 0;
@@ -48,7 +50,7 @@ export class GameState {
   }
 
   get drawCost(): number {
-    return CONFIG.qi.drawCost + this.drawCount * CONFIG.qi.costStep;
+    return (CONFIG.qi.drawCost + this.drawCount * CONFIG.qi.costStep) * this.diff.drawCostMul;
   }
   get stashSlots(): number {
     return CONFIG.stashSlots;
@@ -141,8 +143,8 @@ export class GameState {
     this.activeCombos = this.combo.recompute(this.board);
   }
 
-  /** 重开整局：重置棋盘 / 经济 / 阶段 / 战斗 */
-  reset(): void {
+  /** 清空整局运行态（不改阶段） */
+  private clearRun(): void {
     for (let i = 0; i < this.board.cellCount; i++) this.board.setOccupant(i, null);
     this.qi = CONFIG.qi.starting;
     this.stash = [];
@@ -151,8 +153,20 @@ export class GameState {
     this.waveIndex = -1;
     this.spawnQueue = 0;
     this.spawnTimer = 0;
-    this.phase = 'building';
     this.combat.reset();
+  }
+
+  /** 回到难度选择面板 */
+  toMenu(): void {
+    this.clearRun();
+    this.phase = 'select';
+  }
+
+  /** 选定难度并开始整局 */
+  start(diff: Difficulty): void {
+    this.diff = diff;
+    this.clearRun();
+    this.phase = 'building';
   }
 
   // ── 回合 / 续局（GDD §3，已去三选一）────────────────────
@@ -165,7 +179,7 @@ export class GameState {
       this.phase = 'won';
       return;
     }
-    this.spawnQueue = WAVES[this.waveIndex].count;
+    this.spawnQueue = WAVES[this.waveIndex].count * this.diff.countMul;
     this.spawnTimer = 0;
     this.phase = 'wave';
   }
@@ -177,7 +191,10 @@ export class GameState {
     if (this.spawnQueue > 0) {
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0) {
-        this.combat.spawn(w.hp, w.speed);
+        const i = this.waveIndex;
+        const hp = (WAVE_BASE_HP + i * WAVE_HP_GROWTH) * this.diff.hpMul * Math.pow(this.diff.hpPerWave, i);
+        const speed = w.speed * this.diff.speedMul * Math.pow(this.diff.speedPerWave, i);
+        this.combat.spawn(hp, speed);
         this.spawnQueue--;
         this.spawnTimer = w.interval;
       }
