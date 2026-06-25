@@ -33,14 +33,14 @@ export const COMBO_TABLE: ComboDef[] = [
     ],
   },
   {
-    pair: ['dui', 'qian'], name: '泽天阵', desc: '暴击射金剑 / 击杀掉铜钱',
+    pair: ['dui', 'qian'], name: '泽天阵', desc: '暴击射金剑 / 击杀掉灵气',
     riders: [
       { to: 'qian', rider: { verb: 'onHit', target: 'enemy', params: { effect: 'goldSword', dmg: 8, chance: 0.3 } } },
       { to: 'dui', rider: { verb: 'onKill', target: 'self', params: { drop: 'coin', amount: 1 } } },
     ],
   },
   {
-    pair: ['kun', 'dui'], name: '地泽阵', desc: '召唤物击杀掉铜钱',
+    pair: ['kun', 'dui'], name: '地泽阵', desc: '召唤物击杀掉灵气',
     riders: [
       { to: 'kun', rider: { verb: 'onKill', target: 'self', params: { drop: 'coin', amount: 1 } } },
       { to: 'dui', rider: { verb: 'statMod', target: 'self', params: { stat: 'damage', mul: 1.15 } } },

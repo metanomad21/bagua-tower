@@ -65,6 +65,12 @@ export interface GuaInstance {
   activeRiders: Rider[];
 }
 
+/** 暂存区一项：卦定义 + 当前等级（暂存内可合成升级，GDD §7） */
+export interface StashItem {
+  def: GuaDef;
+  level: number;
+}
+
 /** 方位 id（九宫方位层，MVP 休眠，GDD §4） */
 export type ZoneId = GuaId | 'center';
 

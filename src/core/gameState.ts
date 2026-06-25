@@ -3,7 +3,7 @@ import { RNG } from './rng.ts';
 import { ComboEngine, type ActiveCombo } from './comboEngine.ts';
 import { CombatSystem } from './combat.ts';
 import type { Topology } from './topology.ts';
-import type { GuaDef } from './types.ts';
+import type { GuaDef, StashItem } from './types.ts';
 import { GUA_TABLE } from '../data/gua.ts';
 import { COMBO_TABLE } from '../data/combos.ts';
 import { CONFIG } from '../data/config.ts';
@@ -11,17 +11,15 @@ import { WAVES } from '../data/waves.ts';
 
 // ─────────────────────────────────────────────────────────────
 // 顶层状态容器（GDD §11 Core 层）。纯逻辑，零渲染依赖。
-// 核心循环：起卦 → 放卦/合成 → 连阵 → 守波 → 续局（GDD §3，已去三选一）。
+// 核心循环：起卦 → 放卦/合成 → 连阵 → 回合 → 续局（GDD §3，已去三选一）。
 // 走高 = 自走棋合成（GDD §6.1）；拖拽语法见 GDD §7。
 // ─────────────────────────────────────────────────────────────
 
 export type DropResult = 'placed' | 'merged' | 'illegal';
 export type MoveResult = 'moved' | 'merged' | 'swapped' | 'illegal';
-export type DrawResult =
-  | { ok: true; def: GuaDef }
-  | { ok: false; reason: 'no-qi' | 'stash-full' };
+export type DrawResult = { ok: true } | { ok: false; reason: 'no-qi' };
 
-/** 局内阶段：布阵 / 守波 / 胜 / 负（无三选一） */
+/** 局内阶段：布阵 / 回合 / 胜 / 负（无三选一） */
 export type RunPhase = 'building' | 'wave' | 'won' | 'lost';
 
 export class GameState {
@@ -31,8 +29,10 @@ export class GameState {
   readonly combat: CombatSystem;
 
   qi = CONFIG.qi.starting;
-  stash: GuaDef[] = [];
+  stash: StashItem[] = [];
   activeCombos: ActiveCombo[] = [];
+  /** 整局已起卦次数（驱动成本递增，整局累加、不重置） */
+  drawCount = 0;
 
   phase: RunPhase = 'building';
   waveIndex = -1;
@@ -48,7 +48,7 @@ export class GameState {
   }
 
   get drawCost(): number {
-    return CONFIG.qi.drawCost;
+    return CONFIG.qi.drawCost + this.drawCount * CONFIG.qi.costStep;
   }
   get stashSlots(): number {
     return CONFIG.stashSlots;
@@ -59,28 +59,31 @@ export class GameState {
 
   // ── 起卦（GDD §8）───────────────────────────────────────
 
+  /** 起卦：清空暂存并重抽满 6 个（消耗一次起卦成本）。GDD §14④ */
   drawGua(): DrawResult {
     if (this.qi < this.drawCost) return { ok: false, reason: 'no-qi' };
-    if (this.stash.length >= this.stashSlots) return { ok: false, reason: 'stash-full' };
     this.qi -= this.drawCost;
-    const def = this.rng.pick(GUA_TABLE);
-    this.stash.push(def);
-    return { ok: true, def };
+    this.drawCount += 1;
+    this.stash = [];
+    for (let k = 0; k < CONFIG.stashSlots; k++) {
+      this.stash.push({ def: this.rng.pick(GUA_TABLE), level: 1 });
+    }
+    return { ok: true };
   }
 
   // ── 拖拽语法（GDD §7）───────────────────────────────────
 
   /** 从暂存区落子：空格放置 Lv1 / 同卦同级（即 Lv1）合成 / 否则非法 */
   dropFromStash(stashIndex: number, cellIndex: number): DropResult {
-    const def = this.stash[stashIndex];
-    if (!def) return 'illegal';
+    const item = this.stash[stashIndex];
+    if (!item) return 'illegal';
     const occ = this.board.occupant(cellIndex);
     let result: DropResult;
     if (!occ) {
-      this.board.setOccupant(cellIndex, { def, level: 1, cellIndex, activeRiders: [] });
+      this.board.setOccupant(cellIndex, { def: item.def, level: item.level, cellIndex, activeRiders: [] });
       result = 'placed';
-    } else if (occ.def.id === def.id && occ.level === 1 && occ.level < def.maxLevel) {
-      occ.level += 1; // Lv1 + Lv1 → Lv2
+    } else if (occ.def.id === item.def.id && occ.level === item.level && occ.level < item.def.maxLevel) {
+      occ.level += 1; // 同卦同级 → 高一级
       result = 'merged';
     } else {
       return 'illegal';
@@ -88,6 +91,22 @@ export class GameState {
     this.stash.splice(stashIndex, 1);
     this.recomputeCombos();
     return result;
+  }
+
+  /** 暂存内拖拽：同卦同级合成 / 否则交换位置（不触发 combo，GDD §7） */
+  stashDrop(fromIndex: number, toIndex: number): 'merged' | 'swapped' | 'illegal' {
+    if (fromIndex === toIndex) return 'illegal';
+    const a = this.stash[fromIndex];
+    const b = this.stash[toIndex];
+    if (!a || !b) return 'illegal';
+    if (a.def.id === b.def.id && a.level === b.level && b.level < b.def.maxLevel) {
+      b.level += 1;
+      this.stash.splice(fromIndex, 1);
+      return 'merged';
+    }
+    this.stash[fromIndex] = b;
+    this.stash[toIndex] = a;
+    return 'swapped';
   }
 
   /** 盘上卦拖动：空格=移动 / 同卦同级=合成（消源格）/ 其他占用=交换。GDD §7 改版 */
@@ -122,7 +141,21 @@ export class GameState {
     this.activeCombos = this.combo.recompute(this.board);
   }
 
-  // ── 守波 / 续局（GDD §3，已去三选一）────────────────────
+  /** 重开整局：重置棋盘 / 经济 / 阶段 / 战斗 */
+  reset(): void {
+    for (let i = 0; i < this.board.cellCount; i++) this.board.setOccupant(i, null);
+    this.qi = CONFIG.qi.starting;
+    this.stash = [];
+    this.activeCombos = [];
+    this.drawCount = 0;
+    this.waveIndex = -1;
+    this.spawnQueue = 0;
+    this.spawnTimer = 0;
+    this.phase = 'building';
+    this.combat.reset();
+  }
+
+  // ── 回合 / 续局（GDD §3，已去三选一）────────────────────
 
   /** 开始下一波（building → wave） */
   startWave(): void {
@@ -152,7 +185,7 @@ export class GameState {
 
     this.combat.update(dt);
 
-    // 经济：铜钱回灵气
+    // 经济：击杀掉的灵气实时入账
     if (this.combat.coins > 0) {
       this.qi += this.combat.coins;
       this.combat.coins = 0;
@@ -163,10 +196,9 @@ export class GameState {
       return;
     }
 
-    // 本波清完 → 回灵气，回布阵（无三选一）；最后一波则通关
+    // 本回合清完 → 回布阵（灵气靠击杀即时获得，无回合奖励 / 三选一）；最后一回合则通关
     if (this.spawnQueue === 0 && this.combat.enemies.length === 0) {
       this.combat.clearTransients();
-      this.qi += CONFIG.qi.perWave;
       this.phase = this.waveIndex >= WAVES.length - 1 ? 'won' : 'building';
     }
   }

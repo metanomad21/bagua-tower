@@ -5,6 +5,7 @@ import type { GuaId, RangeBand } from '../core/types.ts';
 import { COMBO_TABLE } from '../data/combos.ts';
 import { GUA_TABLE } from '../data/gua.ts';
 import { CONFIG } from '../data/config.ts';
+import { EffectsLayer, damageNumber, qiPickup, coinBurst } from './effects.ts';
 
 // ─────────────────────────────────────────────────────────────
 // 表现层（GDD §11 View）。只订阅 core 状态来画，不持有游戏逻辑。
@@ -29,38 +30,33 @@ for (const g of GUA_TABLE) NAME[g.id] = g.name;
 
 type DragSource = { kind: 'stash'; index: number } | { kind: 'board'; cell: number } | null;
 
-interface Vfx {
-  type: 'proj' | 'flash' | 'num';
-  pos: Vec2;
-  kind: string;
-  t: number;
-  dur: number;
-  from?: Vec2;
-  amt?: number;
-}
+// 攻击特效已由 effects.ts 的 Effect 系统驱动
 
 export class BoardView {
   readonly root = new Container();
   private boardLayer = new Container();
   private dynLayer = new Container();
-  private vfxLayer = new Container();
+  private effects = new EffectsLayer();
   private stashLayer = new Container();
   private hud = new Container();
   private panel = new Container();
   private overlay = new Container();
+  private livePanel = new Container();
+  private towerLayer = new Container();
 
   private infoText: Text;
-  private hintText: Text;
+  private costText: Text;
   private drawBtn: Container;
   private waveBtn: Container;
 
-  private vfx: Vfx[] = [];
+  private attackFlash = new Map<number, number>();
   private drag: DragSource = null;
   private dragGhost: Container | null = null;
   private lastPhase = '';
   private clock = 0;
   private wasWave = false;
   private dragPointer: { x: number; y: number } | null = null;
+  private dirty = true; // 状态驱动层（塔/暂存/阵法面板）需重建
 
   private boardW: number;
   private boardH: number;
@@ -72,15 +68,18 @@ export class BoardView {
   ) {
     this.boardW = topo.cols * SCALE;
     this.boardH = topo.rows * SCALE;
-    this.root.addChild(this.boardLayer, this.dynLayer, this.vfxLayer, this.stashLayer, this.hud, this.panel, this.overlay);
+    this.root.addChild(this.boardLayer, this.towerLayer, this.dynLayer, this.effects.container, this.stashLayer, this.hud, this.panel, this.livePanel, this.overlay);
 
     this.buildBoard();
     this.buildMarkers();
     this.buildPanel();
     this.infoText = new Text({ text: '', style: { fill: 0xe8e3ff, fontSize: 16 } });
-    this.hintText = new Text({ text: '', style: { fill: 0x9d8cff, fontSize: 15 } });
-    this.drawBtn = this.makeButton('起卦', 90, 36, () => this.state.drawGua());
-    this.waveBtn = this.makeButton('开始守波', 110, 36, () => this.state.startWave());
+    this.costText = new Text({ text: '', style: { fill: 0x9d8cff, fontSize: 14 } });
+    this.drawBtn = this.makeButton('起卦', 90, 36, () => {
+      this.state.drawGua();
+      this.dirty = true;
+    });
+    this.waveBtn = this.makeButton('开始回合', 110, 36, () => this.state.startWave());
     this.buildHud();
 
     this.setupDragSurface();
@@ -133,24 +132,20 @@ export class BoardView {
   // ── 每帧动态渲染 ───────────────────────────────────────
 
   private redrawDynamic(): void {
-    this.dynLayer.removeChildren();
+    this.clearContainer(this.dynLayer);
     const cb = this.state.combat;
 
-    for (const z of cb.zones) {
-      const col = z.kind === 'iceWall' ? 0x4ea8de : 0xef476f;
-      this.dynLayer.addChild(new Graphics().circle(z.pos.x * SCALE, z.pos.y * SCALE, z.radius * SCALE).fill({ color: col, alpha: 0.15 }));
-    }
+    for (const z of cb.zones) this.drawZone(z);
 
+    // 组合塔边框脉冲（仅 Graphics，每帧重画并销毁）
     for (const i of this.state.board.occupiedIndices()) {
       const inst = this.state.board.occupant(i)!;
+      if (inst.activeRiders.length === 0) continue;
       const { r, c } = this.topo.coord(i);
-      const x = c * SCALE;
-      const y = r * SCALE;
-      const tile = new Graphics().roundRect(x + 4, y + 4, SCALE - 8, SCALE - 8, 6).fill({ color: GUA_COLOR[inst.def.id] });
-      if (inst.activeRiders.length > 0) tile.roundRect(x + 4, y + 4, SCALE - 8, SCALE - 8, 6).stroke({ width: 3, color: 0xffffff });
-      this.dynLayer.addChild(tile);
-      this.dynLayer.addChild(this.text(inst.def.name, x + SCALE / 2, y + SCALE / 2 - 5, 24, 0x141018));
-      this.dynLayer.addChild(this.text(`Lv${inst.level}`, x + SCALE / 2, y + SCALE - 13, 11, 0x141018));
+      const a = 0.4 + 0.35 * Math.sin(this.clock * 6) + (this.attackFlash.has(i) ? 0.5 : 0);
+      this.dynLayer.addChild(
+        new Graphics().roundRect(c * SCALE + 4, r * SCALE + 4, SCALE - 8, SCALE - 8, 6).stroke({ width: 3, color: 0xffffff, alpha: Math.min(1, a) }),
+      );
     }
 
     for (const e of cb.enemies) {
@@ -164,6 +159,53 @@ export class BoardView {
     }
 
     if (this.drag) this.drawDragHints();
+  }
+
+  /** 卦象塔（状态驱动重建：色块 + 卦名 + 等级）。Text 仅在变化时创建，避免每帧泄漏 */
+  private rebuildTowers(): void {
+    this.clearContainer(this.towerLayer);
+    for (const i of this.state.board.occupiedIndices()) {
+      const inst = this.state.board.occupant(i)!;
+      const { r, c } = this.topo.coord(i);
+      const x = c * SCALE;
+      const y = r * SCALE;
+      this.towerLayer.addChild(new Graphics().roundRect(x + 4, y + 4, SCALE - 8, SCALE - 8, 6).fill({ color: GUA_COLOR[inst.def.id] }));
+      this.towerLayer.addChild(this.text(inst.def.name, x + SCALE / 2, y + SCALE / 2 - 5, 24, 0x141018));
+      this.towerLayer.addChild(this.text(`Lv${inst.level}`, x + SCALE / 2, y + SCALE - 13, 11, 0x141018));
+    }
+  }
+
+  /** 移除并销毁容器全部子项（释放 Text 纹理 / Graphics 几何） */
+  private clearContainer(c: Container): void {
+    for (const child of c.removeChildren()) child.destroy({ children: true });
+  }
+
+  /** 区域特效：火苗带 / 结晶冰墙（GDD §10）。坐标=格×SCALE */
+  private drawZone(z: { pos: Vec2; radius: number; kind: string }): void {
+    const cx = z.pos.x * SCALE;
+    const cy = z.pos.y * SCALE;
+    const r = z.radius * SCALE;
+    const g = new Graphics();
+    if (z.kind === 'iceWall') {
+      const pts: number[] = [];
+      const n = 8;
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const rad = r * (i % 2 ? 1 : 0.62);
+        pts.push(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad);
+      }
+      g.poly(pts).fill({ color: 0x9fd8f0, alpha: 0.3 }).stroke({ width: 2, color: 0xd8f4ff, alpha: 0.65 });
+    } else {
+      g.circle(cx, cy, r).fill({ color: 0xff8c42, alpha: 0.12 });
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        const fl = 0.6 + 0.4 * Math.sin(this.clock * 9 + i * 1.7);
+        const bx = cx + Math.cos(a) * r * 0.5;
+        const by = cy + Math.sin(a) * r * 0.5;
+        g.poly([bx - 4, by, bx, by - 15 * fl, bx + 4, by]).fill({ color: i % 2 ? 0xffe066 : 0xef476f, alpha: 0.7 });
+      }
+    }
+    this.dynLayer.addChild(g);
   }
 
   private drawDragHints(): void {
@@ -193,23 +235,23 @@ export class BoardView {
 
   private draggedRangeBand(): RangeBand | null {
     if (!this.drag) return null;
-    if (this.drag.kind === 'stash') return this.state.stash[this.drag.index]?.base.range ?? null;
+    if (this.drag.kind === 'stash') return this.state.stash[this.drag.index]?.def.base.range ?? null;
     return this.state.board.occupant(this.drag.cell)?.def.base.range ?? null;
   }
 
   private draggedColor(): number {
     if (!this.drag) return 0xffffff;
-    const id = this.drag.kind === 'stash' ? this.state.stash[this.drag.index]?.id : this.state.board.occupant(this.drag.cell)?.def.id;
+    const id = this.drag.kind === 'stash' ? this.state.stash[this.drag.index]?.def.id : this.state.board.occupant(this.drag.cell)?.def.id;
     return id ? GUA_COLOR[id] : 0xffffff;
   }
 
   private hintColor(i: number): number | null {
     const occ = this.state.board.occupant(i);
     if (this.drag!.kind === 'stash') {
-      const def = this.state.stash[this.drag!.index];
-      if (!def) return null;
-      if (!occ) return this.wouldCombo(i, def.id) ? C_COMBO : C_MOVE;
-      if (occ.def.id === def.id && occ.level === 1 && occ.level < def.maxLevel) return C_MERGE;
+      const item = this.state.stash[this.drag!.index];
+      if (!item) return null;
+      if (!occ) return this.wouldCombo(i, item.def.id) ? C_COMBO : C_MOVE;
+      if (occ.def.id === item.def.id && occ.level === item.level && occ.level < item.def.maxLevel) return C_MERGE;
       return null;
     }
     const from = this.drag!.cell;
@@ -231,76 +273,101 @@ export class BoardView {
 
   // ── 特效系统（弹道 / 闪光 / 伤害数字）──────────────────
 
-  private updateVfx(dt: number): void {
-    for (const f of this.state.combat.fx) {
-      if (f.from) this.vfx.push({ type: 'proj', from: f.from, pos: f.pos, kind: f.kind, t: 0, dur: 0.12 });
-      this.vfx.push({ type: 'flash', pos: f.pos, kind: f.kind, t: 0, dur: 0.3 });
-      if (f.amt) this.vfx.push({ type: 'num', pos: f.pos, kind: f.kind, amt: f.amt, t: 0, dur: 0.6 });
-    }
-    for (const v of this.vfx) v.t += dt;
-    this.vfx = this.vfx.filter((v) => v.t < v.dur);
-
-    this.vfxLayer.removeChildren();
-    for (const v of this.vfx) {
-      const col = EL_COLOR[v.kind] ?? 0xffffff;
-      const p = v.t / v.dur;
-      if (v.type === 'proj' && v.from) {
-        const x = (v.from.x + (v.pos.x - v.from.x) * p) * SCALE;
-        const y = (v.from.y + (v.pos.y - v.from.y) * p) * SCALE;
-        this.vfxLayer.addChild(new Graphics().circle(x, y, 5).fill({ color: col }));
-      } else if (v.type === 'flash') {
-        this.vfxLayer.addChild(new Graphics().circle(v.pos.x * SCALE, v.pos.y * SCALE, 10 + p * 16).fill({ color: col, alpha: 0.55 * (1 - p) }));
-      } else if (v.type === 'num' && v.amt) {
-        const t = this.text(`-${Math.round(v.amt)}`, v.pos.x * SCALE, v.pos.y * SCALE - p * 28, 13, col);
-        t.alpha = 1 - p;
-        this.vfxLayer.addChild(t);
+  private consumeEvents(): void {
+    for (const ev of this.state.combat.events) {
+      if (ev.t === 'attack') {
+        this.effects.spawn(ev);
+        this.attackFlash.set(this.topo.index(Math.floor(ev.from.y), Math.floor(ev.from.x)), 0.15);
+      } else if (ev.t === 'rider') {
+        this.effects.spawn(ev);
+      } else if (ev.t === 'dmg') {
+        const col = EL_COLOR[ev.kind] ?? 0xffffff;
+        this.effects.addEffect(damageNumber({ x: ev.pos.x * SCALE, y: ev.pos.y * SCALE }, ev.amt, col));
+      } else if (ev.t === 'kill' && ev.coins > 0) {
+        const p = { x: ev.pos.x * SCALE, y: ev.pos.y * SCALE };
+        this.effects.addEffect(coinBurst(p));
+        const n = Math.min(ev.coins, 9);
+        for (let k = 0; k < n; k++) {
+          const jp = { x: p.x + (k - (n - 1) / 2) * 12, y: p.y };
+          this.effects.addEffect(qiPickup(jp, { x: 30, y: this.infoText.y }, k * 0.12));
+        }
       }
     }
+    this.state.combat.events = []; // 消费后清空，避免非战斗帧重复重放最后一帧事件
   }
 
   // ── HUD / 暂存 ─────────────────────────────────────────
 
   private buildHud(): void {
     this.infoText.position.set(0, -0.6 * SCALE - 30);
-    this.hintText.position.set(0, this.boardH + 0.6 * SCALE + 10);
-    this.drawBtn.position.set(0, this.boardH + 0.6 * SCALE + 38);
-    this.waveBtn.position.set(100, this.boardH + 0.6 * SCALE + 38);
-    this.stashLayer.position.set(0, this.boardH + 0.6 * SCALE + 84);
-    this.hud.addChild(this.infoText, this.hintText, this.drawBtn, this.waveBtn);
+    this.drawBtn.position.set(0, this.boardH + 0.6 * SCALE + 14);
+    this.costText.position.set(100, this.boardH + 0.6 * SCALE + 24);
+    this.waveBtn.position.set(this.boardW - 110, this.boardH + 0.6 * SCALE + 14);
+    this.stashLayer.position.set(0, this.boardH + 0.6 * SCALE + 90);
+    this.livePanel.position.set(-150, -0.4 * SCALE);
+    this.hud.addChild(this.infoText, this.drawBtn, this.waveBtn, this.costText);
+  }
+
+  /** 左侧「场上阵法」：实时列出当前有效组合及层数（×N） */
+  private updateLivePanel(): void {
+    this.clearContainer(this.livePanel);
+    this.livePanel.addChild(this.text('场上阵法', 0, 0, 16, 0xffd166, false));
+    const counts = new Map<string, number>();
+    for (const a of this.state.activeCombos) counts.set(a.def.name, (counts.get(a.def.name) ?? 0) + 1);
+    if (counts.size === 0) {
+      this.livePanel.addChild(this.text('（暂无）', 0, 26, 13, 0x6b6580, false));
+      return;
+    }
+    let y = 26;
+    for (const [name, n] of counts) {
+      this.livePanel.addChild(this.text(n > 1 ? `${name} ×${n}` : name, 0, y, 14, 0xe8e3ff, false));
+      y += 22;
+    }
   }
 
   private updateHud(): void {
     const s = this.state;
     const waveNo = s.waveIndex < 0 ? 0 : s.waveIndex + 1;
-    this.infoText.text = `灵气 ${s.qi}    核心 ${s.combat.coreHp}    波次 ${waveNo}/${s.totalWaves}    ${this.phaseLabel()}`;
-    const names = [...new Set(s.activeCombos.map((a) => a.def.name))];
-    this.hintText.text = names.length ? `成阵：${names.join('  ')}` : '（相邻不同卦成阵；同卦同级合成）';
+    this.infoText.text = `灵气 ${s.qi}    HP ${s.combat.coreHp}    回合 ${waveNo}/${s.totalWaves}    ${this.phaseLabel()}`;
     this.waveBtn.visible = s.phase === 'building';
     this.drawBtn.visible = s.phase === 'building' || s.phase === 'wave';
+    this.costText.text = `消耗 ${s.drawCost} 灵气`;
+    this.costText.visible = this.drawBtn.visible;
   }
 
   private phaseLabel(): string {
     switch (this.state.phase) {
       case 'building': return '布阵中';
-      case 'wave': return '守波中';
+      case 'wave': return '回合中';
       case 'won': return '通关';
       case 'lost': return '败北';
     }
   }
 
   private buildStash(): void {
-    this.stashLayer.removeChildren();
-    this.stashLayer.addChild(this.text('暂存', 18, 14, 13, 0x9d8cff));
-    this.state.stash.forEach((def, idx) => {
+    this.clearContainer(this.stashLayer);
+    const slotX = (s: number): number => 12 + s * 52;
+    const slots = CONFIG.stashSlots + 1; // 含 🐢 槽
+    // 外框 + 空槽底色（与棋盘风格一致）
+    this.stashLayer.addChild(new Graphics().roundRect(slotX(0) - 6, -16, slots * 52 + 4, 60, 12).stroke({ width: 2, color: 0x3a3550 }));
+    for (let s = 0; s < slots; s++) {
+      this.stashLayer.addChild(
+        new Graphics().roundRect(slotX(s), -8, 44, 44, 6).fill({ color: 0x171426 }).stroke({ width: 1, color: 0x2a2640 }),
+      );
+    }
+    // 🐢 水平竖直居中于第 0 槽
+    this.stashLayer.addChild(this.text('🐢', slotX(0) + 22, 14, 30, 0xe8e3ff));
+    this.state.stash.forEach((item, idx) => {
       const tile = new Container();
-      tile.addChild(new Graphics().roundRect(0, 0, 44, 44, 6).fill({ color: GUA_COLOR[def.id] }));
-      tile.addChild(this.text(def.name, 22, 22, 22, 0x141018));
-      tile.position.set(48 + idx * 52, -8);
+      tile.addChild(new Graphics().roundRect(0, 0, 44, 44, 6).fill({ color: GUA_COLOR[item.def.id] }));
+      tile.addChild(this.text(item.def.name, 22, 20, 22, 0x141018));
+      if (item.level > 1) tile.addChild(this.text(`Lv${item.level}`, 22, 37, 10, 0x141018));
+      tile.position.set(slotX(idx + 1), -8);
       tile.eventMode = 'static';
       tile.cursor = 'grab';
       tile.on('pointerdown', (e) => {
         e.stopPropagation();
-        this.startDrag({ kind: 'stash', index: idx }, e.global.x, e.global.y, def.id);
+        this.startDrag({ kind: 'stash', index: idx }, e.global.x, e.global.y, item.def.id);
       });
       this.stashLayer.addChild(tile);
     });
@@ -348,11 +415,19 @@ export class BoardView {
       this.cancelDrag();
       return;
     }
-    const cell = this.cellOf(gx, gy);
-    if (cell != null) {
-      if (this.drag.kind === 'stash') this.state.dropFromStash(this.drag.index, cell);
-      else this.state.dropFromBoard(this.drag.cell, cell);
+    if (this.drag.kind === 'stash') {
+      const sIdx = this.stashSlotAt(gx, gy);
+      if (sIdx != null && sIdx !== this.drag.index) {
+        this.state.stashDrop(this.drag.index, sIdx); // 暂存内合成/交换
+      } else {
+        const cell = this.cellOf(gx, gy);
+        if (cell != null) this.state.dropFromStash(this.drag.index, cell);
+      }
+    } else {
+      const cell = this.cellOf(gx, gy);
+      if (cell != null) this.state.dropFromBoard(this.drag.cell, cell);
     }
+    this.dirty = true; // 棋盘/暂存可能变化，触发状态层重建
     this.cancelDrag();
   }
 
@@ -373,16 +448,35 @@ export class BoardView {
     return this.topo.index(r, c);
   }
 
+  private stashSlotAt(gx: number, gy: number): number | null {
+    const p = this.stashLayer.toLocal({ x: gx, y: gy });
+    for (let i = 0; i < this.state.stash.length; i++) {
+      const tx = 12 + (i + 1) * 52;
+      if (p.x >= tx && p.x <= tx + 44 && p.y >= -8 && p.y <= 36) return i;
+    }
+    return null;
+  }
+
   // ── 胜负覆盖层（已去三选一）────────────────────────────
 
   private syncOverlay(): void {
     if (this.state.phase === this.lastPhase) return;
     this.lastPhase = this.state.phase;
-    this.overlay.removeChildren();
+    this.clearContainer(this.overlay);
     if (this.state.phase === 'won' || this.state.phase === 'lost') {
       const txt = this.state.phase === 'won' ? '通关！守住了中宫' : '败北 · 中宫被破';
-      this.overlay.addChild(this.text(txt, this.boardW / 2, this.boardH / 2, 26, 0xffd166));
+      this.overlay.addChild(this.text(txt, this.boardW / 2, this.boardH / 2 - 20, 26, 0xffd166));
+      const btn = this.makeButton('重新开始', 120, 40, () => this.restart());
+      btn.position.set(this.boardW / 2 - 60, this.boardH / 2 + 16);
+      this.overlay.addChild(btn);
     }
+  }
+
+  private restart(): void {
+    this.state.reset();
+    this.effects.clear();
+    this.attackFlash.clear();
+    this.dirty = true;
   }
 
   // ── 帧更新 ─────────────────────────────────────────────
@@ -391,11 +485,24 @@ export class BoardView {
     const d = Math.min(dt, 0.05);
     this.clock += d;
     this.state.tick(d);
-    if (this.wasWave && this.state.phase !== 'wave') this.vfx = []; // 波末清残留特效
+    this.consumeEvents();
+    if (this.wasWave && this.state.phase !== 'wave') {
+      this.attackFlash.clear(); // 在播特效让其自然播完，只清边框闪烁计时
+    }
     this.wasWave = this.state.phase === 'wave';
+    for (const [k, v] of this.attackFlash) {
+      const nv = v - d;
+      if (nv <= 0) this.attackFlash.delete(k);
+      else this.attackFlash.set(k, nv);
+    }
     this.redrawDynamic();
-    this.updateVfx(d);
-    if (!this.dragGhost) this.buildStash();
+    this.effects.update(d);
+    if (this.dirty && !this.dragGhost) {
+      this.rebuildTowers();
+      this.buildStash();
+      this.updateLivePanel();
+      this.dirty = false;
+    }
     this.updateHud();
     this.syncOverlay();
   }
@@ -424,7 +531,7 @@ export class BoardView {
 
   private layout(): void {
     this.root.position.set(
-      Math.round((this.app.renderer.width - this.boardW) / 2 - 110),
+      Math.round((this.app.renderer.width - this.boardW) / 2 - 40),
       Math.round((this.app.renderer.height - this.boardH) / 2),
     );
   }
