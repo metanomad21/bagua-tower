@@ -1,0 +1,173 @@
+import { Board } from './board.ts';
+import { RNG } from './rng.ts';
+import { ComboEngine, type ActiveCombo } from './comboEngine.ts';
+import { CombatSystem } from './combat.ts';
+import type { Topology } from './topology.ts';
+import type { GuaDef } from './types.ts';
+import { GUA_TABLE } from '../data/gua.ts';
+import { COMBO_TABLE } from '../data/combos.ts';
+import { CONFIG } from '../data/config.ts';
+import { WAVES } from '../data/waves.ts';
+
+// ─────────────────────────────────────────────────────────────
+// 顶层状态容器（GDD §11 Core 层）。纯逻辑，零渲染依赖。
+// 核心循环：起卦 → 放卦/合成 → 连阵 → 守波 → 续局（GDD §3，已去三选一）。
+// 走高 = 自走棋合成（GDD §6.1）；拖拽语法见 GDD §7。
+// ─────────────────────────────────────────────────────────────
+
+export type DropResult = 'placed' | 'merged' | 'illegal';
+export type MoveResult = 'moved' | 'merged' | 'swapped' | 'illegal';
+export type DrawResult =
+  | { ok: true; def: GuaDef }
+  | { ok: false; reason: 'no-qi' | 'stash-full' };
+
+/** 局内阶段：布阵 / 守波 / 胜 / 负（无三选一） */
+export type RunPhase = 'building' | 'wave' | 'won' | 'lost';
+
+export class GameState {
+  readonly board: Board;
+  readonly rng: RNG;
+  readonly combo: ComboEngine;
+  readonly combat: CombatSystem;
+
+  qi = CONFIG.qi.starting;
+  stash: GuaDef[] = [];
+  activeCombos: ActiveCombo[] = [];
+
+  phase: RunPhase = 'building';
+  waveIndex = -1;
+
+  private spawnQueue = 0;
+  private spawnTimer = 0;
+
+  constructor(topo: Topology, seed = 1) {
+    this.board = new Board(topo);
+    this.rng = new RNG(seed);
+    this.combo = new ComboEngine(COMBO_TABLE);
+    this.combat = new CombatSystem(this.board, topo, this.rng);
+  }
+
+  get drawCost(): number {
+    return CONFIG.qi.drawCost;
+  }
+  get stashSlots(): number {
+    return CONFIG.stashSlots;
+  }
+  get totalWaves(): number {
+    return WAVES.length;
+  }
+
+  // ── 起卦（GDD §8）───────────────────────────────────────
+
+  drawGua(): DrawResult {
+    if (this.qi < this.drawCost) return { ok: false, reason: 'no-qi' };
+    if (this.stash.length >= this.stashSlots) return { ok: false, reason: 'stash-full' };
+    this.qi -= this.drawCost;
+    const def = this.rng.pick(GUA_TABLE);
+    this.stash.push(def);
+    return { ok: true, def };
+  }
+
+  // ── 拖拽语法（GDD §7）───────────────────────────────────
+
+  /** 从暂存区落子：空格放置 Lv1 / 同卦同级（即 Lv1）合成 / 否则非法 */
+  dropFromStash(stashIndex: number, cellIndex: number): DropResult {
+    const def = this.stash[stashIndex];
+    if (!def) return 'illegal';
+    const occ = this.board.occupant(cellIndex);
+    let result: DropResult;
+    if (!occ) {
+      this.board.setOccupant(cellIndex, { def, level: 1, cellIndex, activeRiders: [] });
+      result = 'placed';
+    } else if (occ.def.id === def.id && occ.level === 1 && occ.level < def.maxLevel) {
+      occ.level += 1; // Lv1 + Lv1 → Lv2
+      result = 'merged';
+    } else {
+      return 'illegal';
+    }
+    this.stash.splice(stashIndex, 1);
+    this.recomputeCombos();
+    return result;
+  }
+
+  /** 盘上卦拖动：空格=移动 / 同卦同级=合成（消源格）/ 其他占用=交换。GDD §7 改版 */
+  dropFromBoard(fromCell: number, toCell: number): MoveResult {
+    if (fromCell === toCell) return 'illegal';
+    const src = this.board.occupant(fromCell);
+    if (!src) return 'illegal';
+    const target = this.board.occupant(toCell);
+    let result: MoveResult;
+
+    if (!target) {
+      this.board.setOccupant(toCell, src);
+      src.cellIndex = toCell;
+      this.board.setOccupant(fromCell, null);
+      result = 'moved';
+    } else if (target.def.id === src.def.id && target.level === src.level && target.level < src.def.maxLevel) {
+      target.level += 1; // 同卦同级合成，消源格
+      this.board.setOccupant(fromCell, null);
+      result = 'merged';
+    } else {
+      this.board.setOccupant(toCell, src);
+      src.cellIndex = toCell;
+      this.board.setOccupant(fromCell, target);
+      target.cellIndex = fromCell;
+      result = 'swapped';
+    }
+    this.recomputeCombos();
+    return result;
+  }
+
+  recomputeCombos(): void {
+    this.activeCombos = this.combo.recompute(this.board);
+  }
+
+  // ── 守波 / 续局（GDD §3，已去三选一）────────────────────
+
+  /** 开始下一波（building → wave） */
+  startWave(): void {
+    if (this.phase !== 'building') return;
+    this.waveIndex++;
+    if (this.waveIndex >= WAVES.length) {
+      this.phase = 'won';
+      return;
+    }
+    this.spawnQueue = WAVES[this.waveIndex].count;
+    this.spawnTimer = 0;
+    this.phase = 'wave';
+  }
+
+  tick(dt: number): void {
+    if (this.phase !== 'wave') return;
+    const w = WAVES[this.waveIndex];
+
+    if (this.spawnQueue > 0) {
+      this.spawnTimer -= dt;
+      if (this.spawnTimer <= 0) {
+        this.combat.spawn(w.hp, w.speed);
+        this.spawnQueue--;
+        this.spawnTimer = w.interval;
+      }
+    }
+
+    this.combat.update(dt);
+
+    // 经济：铜钱回灵气
+    if (this.combat.coins > 0) {
+      this.qi += this.combat.coins;
+      this.combat.coins = 0;
+    }
+
+    if (this.combat.coreHp <= 0) {
+      this.phase = 'lost';
+      return;
+    }
+
+    // 本波清完 → 回灵气，回布阵（无三选一）；最后一波则通关
+    if (this.spawnQueue === 0 && this.combat.enemies.length === 0) {
+      this.combat.clearTransients();
+      this.qi += CONFIG.qi.perWave;
+      this.phase = this.waveIndex >= WAVES.length - 1 ? 'won' : 'building';
+    }
+  }
+}
